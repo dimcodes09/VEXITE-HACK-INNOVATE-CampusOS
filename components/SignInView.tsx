@@ -2,14 +2,20 @@
 
 import React, { useState } from "react";
 import { signIn } from "next-auth/react";
-import { ShieldCheck, Zap, Cpu, ArrowRight, BookOpen } from "lucide-react";
+import { ShieldCheck, Zap, Cpu, ArrowRight, BookOpen, Sparkles, UserCheck } from "lucide-react";
 
 export default function SignInView() {
   const [loading, setLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
     await signIn("google", { callbackUrl: "/" });
+  };
+
+  const handleDemoSignIn = async () => {
+    setDemoLoading(true);
+    await signIn("demo-login", { callbackUrl: "/" });
   };
 
   return (
@@ -72,7 +78,7 @@ export default function SignInView() {
 
         {/* Right Column: Sign In Action Card */}
         <div className="lg:col-span-5 w-full">
-          <div className="card-panel-elevated rounded-3xl p-6 sm:p-8 space-y-6 relative overflow-hidden">
+          <div className="card-panel-elevated rounded-3xl p-6 sm:p-8 space-y-5 relative overflow-hidden">
             {/* Top Indigo Accent Bar */}
             <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-indigo-500 via-blue-500 to-indigo-600" />
 
@@ -84,16 +90,17 @@ export default function SignInView() {
                 Enter Command Briefing
               </h2>
               <p className="text-xs text-slate-500">
-                Sign in with your student Google account to load your policy-grounded risk radar.
+                Sign in with your student Google account or use 1-click Demo Access.
               </p>
             </div>
 
-            {/* Google Sign In Button */}
-            <div className="space-y-3 pt-2">
+            {/* Auth Actions */}
+            <div className="space-y-3 pt-1">
+              {/* Google Sign In Button */}
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
-                disabled={loading}
+                disabled={loading || demoLoading}
                 className="w-full flex items-center justify-center gap-3 py-3.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm transition-all duration-200 shadow-md shadow-indigo-600/20 hover:scale-[1.01] active:scale-[0.99] disabled:opacity-75 disabled:cursor-not-allowed cursor-pointer"
               >
                 {loading ? (
@@ -126,16 +133,46 @@ export default function SignInView() {
                   </>
                 )}
               </button>
+
+              {/* Divider */}
+              <div className="relative flex items-center justify-center my-2">
+                <div className="border-t border-slate-200 w-full" />
+                <span className="bg-white px-2 text-[11px] font-mono text-slate-400 uppercase tracking-wider">
+                  OR
+                </span>
+                <div className="border-t border-slate-200 w-full" />
+              </div>
+
+              {/* 1-Click Instant Demo / Judge Login */}
+              <button
+                type="button"
+                onClick={handleDemoSignIn}
+                disabled={loading || demoLoading}
+                className="w-full flex items-center justify-center gap-2.5 py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs transition-all duration-200 shadow-sm hover:scale-[1.01] active:scale-[0.99] disabled:opacity-75 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {demoLoading ? (
+                  <div className="flex items-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span className="font-mono text-xs">Entering Demo Briefing...</span>
+                  </div>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4 text-amber-400" />
+                    <span>Instant Demo / Judge Access (No Sign-In)</span>
+                    <ArrowRight className="w-3.5 h-3.5 ml-auto text-slate-400" />
+                  </>
+                )}
+              </button>
             </div>
 
             {/* Institutional Seed Note */}
-            <div className="pt-4 border-t border-slate-100 text-center">
+            <div className="pt-3 border-t border-slate-100 text-center">
               <p className="text-[11px] font-mono text-slate-500 flex items-center justify-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
                 Pre-linked: <span className="text-slate-800 font-semibold">Demo Institute of Technology</span>
               </p>
-              <p className="text-[10px] text-slate-400 mt-1">
-                Policy vector memory preloaded (Attendance, Assessments, Hackathons, Submissions).
+              <p className="text-[10px] text-slate-400 mt-0.5">
+                Pre-loaded with DBMS Timetable, 68% Attendance Record & 2026 Circular Policies.
               </p>
             </div>
           </div>

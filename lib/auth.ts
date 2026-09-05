@@ -1,5 +1,6 @@
 import { getServerSession, type NextAuthOptions, type Session } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
+import CredentialsProvider from "next-auth/providers/credentials";
 import { connectToDatabase } from "@/lib/db";
 import { UserModel } from "@/models/User";
 import { CollegeModel } from "@/models/College";
@@ -22,10 +23,53 @@ export const authOptions: NextAuthOptions = {
           prompt: "select_account"
         }
       }
+    }),
+    CredentialsProvider({
+      id: "demo-login",
+      name: "Demo Student",
+      credentials: {},
+      async authorize() {
+        await connectToDatabase();
+        const defaultCollege = await CollegeModel.findOne().select("_id");
+
+        // Prefer existing seeded user or create demo student
+        let user = await UserModel.findOne({
+          $or: [
+            { email: "divyanshukubde@gmail.com" },
+            { email: "demo.student@campus.os" }
+          ]
+        });
+
+        if (!user) {
+          user = await UserModel.findOne();
+        }
+
+        if (!user) {
+          user = await UserModel.create({
+            googleId: "demo-judge-dit-2026",
+            email: "demo.student@campus.os",
+            name: "Divyanshu Kubde (Demo Scholar)",
+            image: "",
+            collegeId: defaultCollege?._id ?? null,
+            createdAt: new Date()
+          });
+        }
+
+        return {
+          id: user._id.toString(),
+          name: user.name || "Demo Scholar",
+          email: user.email || "demo.student@campus.os",
+          image: user.image || ""
+        };
+      }
     })
   ],
   callbacks: {
     async signIn({ user, account }) {
+      if (account?.provider === "demo-login" || account?.provider === "credentials") {
+        return true;
+      }
+
       if (account?.provider !== "google" || !account.providerAccountId) {
         return false;
       }
@@ -73,16 +117,24 @@ export const authOptions: NextAuthOptions = {
       return true;
     },
     async jwt({ token, account, user }) {
-      if (account?.providerAccountId || user?.email || token?.email) {
+      if (user?.id) {
+        token.mongoUserId = user.id;
+      }
+
+      if (account?.providerAccountId || user?.email || token?.email || token?.mongoUserId) {
         await connectToDatabase();
 
-        const mongoUser = await UserModel.findOne({
-          $or: [
-            ...(account?.providerAccountId ? [{ googleId: account.providerAccountId }] : []),
-            ...(user?.email ? [{ email: user.email }] : []),
-            ...(token?.email ? [{ email: token.email }] : [])
-          ]
-        }).select("_id collegeId");
+        const query = token.mongoUserId
+          ? { _id: token.mongoUserId }
+          : {
+              $or: [
+                ...(account?.providerAccountId ? [{ googleId: account.providerAccountId }] : []),
+                ...(user?.email ? [{ email: user.email }] : []),
+                ...(token?.email ? [{ email: token.email }] : [])
+              ]
+            };
+
+        const mongoUser = await UserModel.findOne(query).select("_id collegeId");
 
         if (mongoUser) {
           if (!mongoUser.collegeId) {
@@ -111,15 +163,13 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
     async redirect({ url, baseUrl }) {
-      // Allows relative callback URLs
       if (url.startsWith("/")) return `${baseUrl}${url}`;
-      // Allows callback URLs on the same origin
       try {
         const urlOrigin = new URL(url).origin;
         const baseOrigin = new URL(baseUrl).origin;
         if (urlOrigin === baseOrigin) return url;
       } catch {
-        // invalid URL format, fallback to base
+        // invalid URL format
       }
       return baseUrl;
     }
