@@ -80,55 +80,65 @@ function sourceFileTypeFor(mimeType: string): "image" | "pdf" | "text" | null {
   return null;
 }
 
-function nullableString(value: unknown): string | null | undefined {
-  return value === null || typeof value === "string" ? value : undefined;
-}
-
-function nullableNumber(value: unknown): number | null | undefined {
-  return value === null || (typeof value === "number" && Number.isFinite(value))
-    ? value
-    : undefined;
+function cleanJsonText(raw: string): string {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "");
+    cleaned = cleaned.replace(/\s*```$/i, "");
+  }
+  return cleaned.trim();
 }
 
 function parseExtractedEvents(value: unknown): ExtractedEvent[] | null {
-  if (!Array.isArray(value)) {
+  let list: unknown[] | null = null;
+  if (Array.isArray(value)) {
+    list = value;
+  } else if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (Array.isArray(obj.events)) {
+      list = obj.events;
+    }
+  }
+
+  if (!list) {
     return null;
   }
 
   const parsedEvents: ExtractedEvent[] = [];
 
-  for (const item of value) {
+  for (const item of list) {
     if (!item || typeof item !== "object") {
-      return null;
+      continue;
     }
 
     const event = item as Record<string, unknown>;
-    const subject = nullableString(event.subject);
-    const startTime = nullableString(event.startTime);
-    const endTime = nullableString(event.endTime);
-    const deadline = nullableString(event.deadline);
-    const location = nullableString(event.location);
-    const attendancePercent = nullableNumber(event.attendancePercent);
-    const estimatedEffortHours = nullableNumber(event.estimatedEffortHours);
+    const rawType = String(event.type || "notice").toLowerCase();
+    const type: EventType = eventTypes.includes(rawType as EventType)
+      ? (rawType as EventType)
+      : "notice";
 
-    if (
-      !eventTypes.includes(event.type as EventType) ||
-      typeof event.title !== "string" ||
-      !event.title.trim() ||
-      subject === undefined ||
-      startTime === undefined ||
-      endTime === undefined ||
-      deadline === undefined ||
-      location === undefined ||
-      attendancePercent === undefined ||
-      estimatedEffortHours === undefined
-    ) {
-      return null;
-    }
+    const title =
+      typeof event.title === "string" && event.title.trim()
+        ? event.title.trim()
+        : "Academic Circular / Notice";
+
+    const subject = typeof event.subject === "string" ? event.subject : null;
+    const startTime = typeof event.startTime === "string" ? event.startTime : null;
+    const endTime = typeof event.endTime === "string" ? event.endTime : null;
+    const deadline = typeof event.deadline === "string" ? event.deadline : null;
+    const location = typeof event.location === "string" ? event.location : null;
+
+    const rawAttn = event.attendancePercent ?? (event as Record<string, unknown>).attendanceThreshold;
+    const attendancePercent =
+      typeof rawAttn === "number" && Number.isFinite(rawAttn) ? rawAttn : null;
+
+    const rawEffort = event.estimatedEffortHours;
+    const estimatedEffortHours =
+      typeof rawEffort === "number" && Number.isFinite(rawEffort) ? rawEffort : null;
 
     parsedEvents.push({
-      type: event.type as EventType,
-      title: event.title.trim(),
+      type,
+      title,
       subject,
       startTime,
       endTime,
@@ -197,8 +207,9 @@ export async function POST(request: Request) {
   let geminiText: string;
 
   try {
+    const modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash";
     const model = getGeminiClient().getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: modelName,
       systemInstruction: EXTRACTION_SYSTEM_PROMPT,
       generationConfig: {
         temperature: 0.2,
@@ -206,10 +217,12 @@ export async function POST(request: Request) {
         responseSchema: extractionResponseSchema
       }
     });
+
     const content =
       sourceFileType === "text"
         ? textInput!
         : [
+            "Extract every distinct academic event, class, notice, exam, assignment, or attendance rule from this document into structured JSON according to the schema.",
             {
               inlineData: {
                 mimeType,
@@ -220,10 +233,10 @@ export async function POST(request: Request) {
     const result = await model.generateContent(content);
 
     geminiText = result.response.text();
-  } catch (error) {
-    console.error("Gemini extraction failed", error);
+  } catch (error: any) {
+    console.error("Gemini extraction failed:", error);
     return NextResponse.json(
-      { error: "Unable to extract events from this upload" },
+      { error: error?.message || "Unable to extract events from this upload" },
       { status: 502 }
     );
   }
@@ -231,19 +244,30 @@ export async function POST(request: Request) {
   let parsedResponse: unknown;
 
   try {
-    parsedResponse = JSON.parse(geminiText);
+    const cleanedText = cleanJsonText(geminiText);
+    parsedResponse = JSON.parse(cleanedText);
   } catch {
-    return NextResponse.json(
-      { error: "Gemini returned an invalid extraction response" },
-      { status: 502 }
-    );
+    const match = geminiText.match(/\[[\s\S]*\]/) || geminiText.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        parsedResponse = JSON.parse(match[0]);
+      } catch {
+        // fallback
+      }
+    }
+    if (!parsedResponse) {
+      return NextResponse.json(
+        { error: "Gemini returned an invalid extraction response" },
+        { status: 502 }
+      );
+    }
   }
 
   const extractedEvents = parseExtractedEvents(parsedResponse);
 
-  if (!extractedEvents) {
+  if (!extractedEvents || extractedEvents.length === 0) {
     return NextResponse.json(
-      { error: "Gemini returned an extraction response with an invalid event shape" },
+      { error: "No structured academic events could be extracted from this document" },
       { status: 502 }
     );
   }

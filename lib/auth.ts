@@ -3,6 +3,8 @@ import GoogleProvider from "next-auth/providers/google";
 import { connectToDatabase } from "@/lib/db";
 import { UserModel } from "@/models/User";
 
+import { CollegeModel } from "@/models/College";
+
 export const authOptions: NextAuthOptions = {
   providers: [
     GoogleProvider({
@@ -20,14 +22,16 @@ export const authOptions: NextAuthOptions = {
 
       const existingUser = await UserModel.findOne({
         googleId: account.providerAccountId
-      }).select("_id");
+      }).select("_id collegeId");
 
       if (!existingUser) {
+        const defaultCollege = await CollegeModel.findOne().select("_id");
         await UserModel.create({
           googleId: account.providerAccountId,
           email: user.email ?? "",
           name: user.name ?? "",
           image: user.image ?? "",
+          collegeId: defaultCollege?._id ?? null,
           createdAt: new Date()
         });
       }
@@ -46,6 +50,16 @@ export const authOptions: NextAuthOptions = {
       }).select("_id collegeId");
 
       if (mongoUser) {
+        if (!mongoUser.collegeId) {
+          const defaultCollege = await CollegeModel.findOne().select("_id");
+          if (defaultCollege) {
+            mongoUser.collegeId = defaultCollege._id;
+            await UserModel.updateOne(
+              { _id: mongoUser._id },
+              { $set: { collegeId: defaultCollege._id } }
+            );
+          }
+        }
         token.mongoUserId = mongoUser._id.toString();
         token.collegeId = mongoUser.collegeId?.toString() ?? null;
       }

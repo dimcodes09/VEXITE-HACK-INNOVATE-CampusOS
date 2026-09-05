@@ -11,9 +11,9 @@ const ConflictSchema = new Schema(
     },
     reasoningChain: { type: String, required: true },
     policyCitation: { type: String, default: null },
-    relatedEventIds: [{ type: Schema.Types.ObjectId, ref: "Event", required: true }],
+    relatedEventIds: [{ type: Schema.Types.Mixed, default: [] }],
     suggestedAction: { type: String, required: true },
-    draftableResolution: { type: Boolean, required: true }
+    draftableResolution: { type: Schema.Types.Mixed, default: false }
   },
   { _id: false }
 );

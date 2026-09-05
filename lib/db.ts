@@ -1,4 +1,7 @@
+import dns from "node:dns";
 import mongoose from "mongoose";
+
+const WINDOWS_ATLAS_DNS_SERVERS = ["1.1.1.1", "1.0.0.1"];
 
 type MongooseCache = {
   conn: typeof mongoose | null;
@@ -23,6 +26,13 @@ export async function connectToDatabase(): Promise<typeof mongoose> {
     throw new Error("Please define the MONGODB_URI environment variable.");
   }
 
+  // Node's c-ares SRV resolver is refused by the local Windows DNS path, while
+  // the same Atlas record resolves through these public resolvers. This affects
+  // only mongodb+srv connections on Windows; Atlas TLS remains enabled.
+  if (process.platform === "win32" && uri.startsWith("mongodb+srv://")) {
+    dns.setServers(WINDOWS_ATLAS_DNS_SERVERS);
+  }
+
   if (cached.conn) {
     return cached.conn;
   }
@@ -33,6 +43,11 @@ export async function connectToDatabase(): Promise<typeof mongoose> {
     });
   }
 
-  cached.conn = await cached.promise;
-  return cached.conn;
+  try {
+    cached.conn = await cached.promise;
+    return cached.conn;
+  } catch (error) {
+    cached.promise = null;
+    throw error;
+  }
 }

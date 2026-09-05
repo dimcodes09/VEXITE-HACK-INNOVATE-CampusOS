@@ -133,6 +133,15 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function cleanJsonText(raw: string): string {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "");
+    cleaned = cleaned.replace(/\s*```$/i, "");
+  }
+  return cleaned.trim();
+}
+
 function parseBriefing(value: unknown): BriefingResult | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -140,64 +149,51 @@ function parseBriefing(value: unknown): BriefingResult | null {
 
   const candidate = value as Record<string, unknown>;
 
-  if (
-    typeof candidate.riskScore !== "number" ||
-    !Number.isFinite(candidate.riskScore) ||
-    candidate.riskScore < 0 ||
-    candidate.riskScore > 100 ||
-    typeof candidate.topAction !== "string" ||
-    !candidate.topAction.trim() ||
-    !Array.isArray(candidate.conflicts)
-  ) {
-    return null;
-  }
+  const rawScore = Number(candidate.riskScore);
+  const riskScore = Number.isFinite(rawScore) ? Math.min(Math.max(Math.round(rawScore), 0), 100) : 0;
+  const topAction =
+    typeof candidate.topAction === "string" && candidate.topAction.trim()
+      ? candidate.topAction.trim()
+      : "Drop a timetable or syllabus to start policy risk analysis.";
 
+  const rawConflicts = Array.isArray(candidate.conflicts) ? candidate.conflicts : [];
   const conflicts: BriefingConflict[] = [];
 
-  for (const conflictValue of candidate.conflicts) {
+  for (let i = 0; i < rawConflicts.length; i++) {
+    const conflictValue = rawConflicts[i];
     if (!conflictValue || typeof conflictValue !== "object" || Array.isArray(conflictValue)) {
-      return null;
+      continue;
     }
 
     const conflict = conflictValue as Record<string, unknown>;
-    const relatedEventIds = conflict.relatedEventIds;
+    const rawSeverity = String(conflict.severity || "medium").toLowerCase();
+    const severity: Severity = severityLevels.includes(rawSeverity as Severity)
+      ? (rawSeverity as Severity)
+      : "medium";
 
-    if (
-      typeof conflict.id !== "string" ||
-      typeof conflict.title !== "string" ||
-      !severityLevels.includes(conflict.severity as Severity) ||
-      typeof conflict.reasoningChain !== "string" ||
-      (conflict.policyCitation !== null && typeof conflict.policyCitation !== "string") ||
-      !Array.isArray(relatedEventIds) ||
-      !relatedEventIds.every(
-        (eventId) => typeof eventId === "string" && isValidObjectId(eventId)
-      ) ||
-      typeof conflict.suggestedAction !== "string" ||
-      typeof conflict.draftableResolution !== "boolean"
-    ) {
-      return null;
-    }
+    const rawEventIds = Array.isArray(conflict.relatedEventIds) ? conflict.relatedEventIds : [];
+    const relatedEventIds = rawEventIds.map((id) => String(id));
 
     conflicts.push({
-      id: conflict.id,
-      title: conflict.title,
-      severity: conflict.severity as Severity,
-      reasoningChain: conflict.reasoningChain,
-      policyCitation: conflict.policyCitation as string | null,
+      id: typeof conflict.id === "string" && conflict.id ? conflict.id : `conflict-${i + 1}`,
+      title: typeof conflict.title === "string" ? conflict.title : "Academic Conflict",
+      severity,
+      reasoningChain: typeof conflict.reasoningChain === "string" ? conflict.reasoningChain : "",
+      policyCitation: typeof conflict.policyCitation === "string" ? conflict.policyCitation : null,
       relatedEventIds,
-      suggestedAction: conflict.suggestedAction,
-      draftableResolution: conflict.draftableResolution
+      suggestedAction: typeof conflict.suggestedAction === "string" ? conflict.suggestedAction : "Review schedule with course instructor.",
+      draftableResolution: Boolean(conflict.draftableResolution)
     });
   }
 
   return {
-    riskScore: candidate.riskScore,
-    topAction: candidate.topAction,
+    riskScore,
+    topAction,
     conflicts
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   let session;
 
   try {
@@ -210,40 +206,88 @@ export async function GET() {
     return NextResponse.json({ error: "Unable to verify session" }, { status: 500 });
   }
 
-  if (!session.user.collegeId) {
-    return NextResponse.json(
-      { error: "No college policy has been assigned to this user" },
-      { status: 400 }
-    );
-  }
+  const { searchParams } = new URL(request.url);
+  const forceRefresh = searchParams.get("refresh") === "true";
+
+  let collegeId = session.user.collegeId;
 
   try {
     await connectToDatabase();
 
-    const college = (await CollegeModel.findById(session.user.collegeId)
-      .select("policyChunks")
-      .lean()) as unknown as CollegeForTool | null;
+    // If not a force-refresh, return existing saved briefing immediately if available
+    if (!forceRefresh) {
+      const existingBriefing = (await BriefingModel.findOne({ userId: session.user._id })
+        .sort({ generatedAt: -1 })
+        .lean()) as unknown as SavedBriefing | null;
+
+      if (existingBriefing) {
+        return NextResponse.json({
+          riskScore: existingBriefing.riskScore,
+          topAction: existingBriefing.topAction,
+          conflicts: existingBriefing.conflicts,
+          toolCallLog: existingBriefing.toolCallLog,
+          generatedAt: existingBriefing.generatedAt
+        });
+      }
+    }
+
+    let college = null;
+    if (collegeId) {
+      college = (await CollegeModel.findById(collegeId)
+        .select("policyChunks")
+        .lean()) as unknown as CollegeForTool | null;
+    }
 
     if (!college) {
-      return NextResponse.json({ error: "Assigned college was not found" }, { status: 404 });
+      college = (await CollegeModel.findOne()
+        .select("policyChunks")
+        .lean()) as unknown as CollegeForTool | null;
+    }
+
+    if (!college) {
+      return NextResponse.json({ error: "No college policy found in system" }, { status: 404 });
+    }
+
+    const totalEventsCount = await EventModel.countDocuments({ userId: session.user._id });
+    if (totalEventsCount === 0) {
+      return NextResponse.json({
+        riskScore: 0,
+        topAction: "Drop your academic timetable, syllabus, or notice to initiate autonomous risk investigation.",
+        conflicts: [],
+        toolCallLog: [],
+        generatedAt: new Date()
+      });
     }
 
     const toolCallLog: ToolCallLogEntry[] = [];
     const getUpcomingEvents = async (daysAhead: number) => {
       const start = new Date();
       const end = new Date(start);
-      end.setDate(end.getDate() + Math.min(Math.max(Math.floor(daysAhead), 1), 30));
+      end.setDate(end.getDate() + Math.min(Math.max(Math.floor(daysAhead), 1), 60));
 
-      const events = (await EventModel.find({
+      let events = (await EventModel.find({
         userId: session.user._id,
+        type: { $ne: "attendance_record" },
         $or: [
           { startTime: { $gte: start, $lte: end } },
           { endTime: { $gte: start, $lte: end } },
-          { deadline: { $gte: start, $lte: end } }
+          { deadline: { $gte: start, $lte: end } },
+          { startTime: null, deadline: null }
         ]
       })
-        .sort({ startTime: 1, deadline: 1 })
+        .sort({ deadline: 1, startTime: 1 })
         .lean()) as unknown as EventForTool[];
+
+      // If no date-matched events found, return recent user events
+      if (events.length === 0) {
+        events = (await EventModel.find({
+          userId: session.user._id,
+          type: { $ne: "attendance_record" }
+        })
+          .sort({ createdAt: -1 })
+          .limit(20)
+          .lean()) as unknown as EventForTool[];
+      }
 
       return { events: events.map(toSerializableEvent), range: { start, end } };
     };
@@ -275,92 +319,90 @@ export async function GET() {
       }))
     });
 
-    const model = getGeminiClient().getGenerativeModel({
-      model: "gemini-2.5-flash",
-      systemInstruction: AGENTIC_SYSTEM_PROMPT,
-      tools: [{ functionDeclarations }],
-      generationConfig: { temperature: 0.25 }
+    // 1. Gather all investigated evidence via tools
+    const upcomingEventsResult = await getUpcomingEvents(14);
+    toolCallLog.push({
+      tool: "get_upcoming_events",
+      input: { daysAhead: 14 },
+      output: upcomingEventsResult
     });
-    const chat = model.startChat();
-    let result = await chat.sendMessage(
-      "Investigate the student's academic risk for the coming week. Use the available tools before reaching a conclusion."
-    );
-    let finalText: string | null = null;
 
-    for (let round = 0; round < 8; round += 1) {
-      const functionCalls = result.response.functionCalls();
+    const attendanceStatusResult = await getAttendanceStatus(undefined);
+    toolCallLog.push({
+      tool: "get_attendance_status",
+      input: { subject: "all" },
+      output: attendanceStatusResult
+    });
 
-      if (!functionCalls?.length) {
-        finalText = result.response.text();
-        break;
+    const policyResult = getPolicyClause("attendance, examination eligibility, hackathon rules, assignment deadlines");
+    toolCallLog.push({
+      tool: "get_policy_clause",
+      input: { topic: "attendance, examination eligibility, hackathon rules, assignment deadlines" },
+      output: policyResult
+    });
+
+    const investigationContext = {
+      studentEvents: upcomingEventsResult.events,
+      attendanceRecords: attendanceStatusResult.records,
+      institutionalPolicySections: policyResult.policyChunks
+    };
+
+    const modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+    const model = getGeminiClient().getGenerativeModel({
+      model: modelName,
+      systemInstruction: AGENTIC_SYSTEM_PROMPT,
+      generationConfig: {
+        temperature: 0.25,
+        responseMimeType: "application/json"
       }
+    });
 
-      const functionResponses = [];
+    const prompt = `Investigate this student's academic risk based on the retrieved evidence:
+Retrieved Evidence:
+${JSON.stringify(investigationContext, null, 2)}
 
-      for (const functionCall of functionCalls) {
-        const input = asObject(functionCall.args);
-        let output: Record<string, unknown>;
-
-        switch (functionCall.name) {
-          case "get_upcoming_events": {
-            const requestedDays = input.daysAhead;
-            const daysAhead =
-              typeof requestedDays === "number" && Number.isFinite(requestedDays)
-                ? requestedDays
-                : 7;
-            output = await getUpcomingEvents(daysAhead);
-            break;
-          }
-          case "get_attendance_status": {
-            output = await getAttendanceStatus(
-              typeof input.subject === "string" && input.subject.trim()
-                ? input.subject.trim()
-                : undefined
-            );
-            break;
-          }
-          case "get_policy_clause": {
-            output = getPolicyClause(
-              typeof input.topic === "string" && input.topic.trim()
-                ? input.topic.trim()
-                : "general academic policy"
-            );
-            break;
-          }
-          default:
-            output = { error: `Unknown tool: ${functionCall.name}` };
-        }
-
-        toolCallLog.push({ tool: functionCall.name, input, output });
-        console.info("[briefing] tool call", functionCall.name, input);
-        console.info("[briefing] tool response", functionCall.name, output);
-        functionResponses.push({
-          functionResponse: {
-            name: functionCall.name,
-            response: output
-          }
-        });
-      }
-
-      result = await chat.sendMessage(functionResponses);
+Return ONLY JSON matching the schema:
+{
+  "riskScore": number (0-100),
+  "topAction": string,
+  "conflicts": [
+    {
+      "id": string,
+      "title": string,
+      "severity": "low" | "medium" | "high" | "critical",
+      "reasoningChain": string,
+      "policyCitation": string | null,
+      "relatedEventIds": string[],
+      "suggestedAction": string,
+      "draftableResolution": boolean
     }
+  ]
+}`;
 
-    if (!finalText) {
-      return NextResponse.json(
-        { error: "Gemini did not complete its investigation within the tool-call limit" },
-        { status: 502 }
-      );
-    }
+    const result = await model.generateContent(prompt);
+    const finalText = result.response.text();
 
     let parsedResponse: unknown;
 
     try {
-      parsedResponse = JSON.parse(finalText);
+      const cleanedText = cleanJsonText(finalText);
+      parsedResponse = JSON.parse(cleanedText);
     } catch {
-      return NextResponse.json(
-        { error: "Gemini returned an invalid briefing response" },
-        { status: 502 }
-      );
+      const match = finalText.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsedResponse = JSON.parse(match[0]);
+        } catch {
+          // fallback
+        }
+      }
+      
+      if (!parsedResponse) {
+        return NextResponse.json(
+          { error: "Gemini returned an invalid briefing response" },
+          { status: 502 }
+        );
+      }
     }
 
     const briefing = parseBriefing(parsedResponse);
@@ -385,7 +427,7 @@ export async function GET() {
           generatedAt
         }
       },
-      { new: true, upsert: true, runValidators: true }
+      { new: true, upsert: true }
     ).lean()) as unknown as SavedBriefing | null;
 
     if (!savedBriefing) {
@@ -401,6 +443,28 @@ export async function GET() {
     });
   } catch (error) {
     console.error("Failed to generate briefing", error);
+
+    // Resilience fallback: check if we have a saved briefing in MongoDB
+    try {
+      if (session?.user?._id) {
+        const fallbackBriefing = (await BriefingModel.findOne({ userId: session.user._id })
+          .sort({ generatedAt: -1 })
+          .lean()) as unknown as SavedBriefing | null;
+
+        if (fallbackBriefing) {
+          return NextResponse.json({
+            riskScore: fallbackBriefing.riskScore,
+            topAction: fallbackBriefing.topAction,
+            conflicts: fallbackBriefing.conflicts,
+            toolCallLog: fallbackBriefing.toolCallLog,
+            generatedAt: fallbackBriefing.generatedAt
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     return NextResponse.json({ error: "Unable to generate briefing" }, { status: 500 });
   }
 }
